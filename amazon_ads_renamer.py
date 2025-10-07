@@ -38,11 +38,18 @@ def find_sp_sheet(uploaded_file):
     excel_file = pd.ExcelFile(uploaded_file)
     sheet_names = excel_file.sheet_names
     
+    # First, try to find by sheet name
+    for sheet_name in sheet_names:
+        if 'Sponsored Products' in sheet_name:
+            df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
+            return sheet_name, df
+    
+    # Fallback: check if column A contains "Sponsored Products"
     for sheet_name in sheet_names:
         df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
         column_a = df.iloc[:, 0].dropna()
         
-        if len(column_a) > 0 and all('Sponsored Products' in str(val) for val in column_a if pd.notna(val)):
+        if len(column_a) > 0 and any('Sponsored Products' in str(val) for val in column_a):
             return sheet_name, df
     
     return None, None
