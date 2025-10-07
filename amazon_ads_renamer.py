@@ -381,13 +381,6 @@ def process_sponsored_products_sheet(df):
     
     return campaigns, global_asin_performance, errors
 
-def generate_campaign_name(campaign, naming_scheme, separators, custom_prefix):Fix' in filters['bidding_strategy']:
-                bidding_code = 'Fix'
-            elif 'UnD' in filters['bidding_strategy']:
-                bidding_code = 'UnD'
-            elif 'DwnO' in filters['bidding_strategy']:
-                bidding_code = 'DwnO'
-            
 def generate_campaign_name(campaign, naming_scheme, separators, custom_prefix):
     """Generate campaign name based on naming scheme"""
     name_parts = []
