@@ -361,6 +361,70 @@ def process_sponsored_products_sheet(df):
     
     return campaigns, global_asin_performance, errors
 
+def filter_campaigns(campaigns, filters):
+    """Filter campaigns based on user-selected criteria"""
+    filtered = {}
+    
+    for campaign_id, campaign in campaigns.items():
+        # Filter by targeting type
+        if filters['targeting_type'] != 'Both':
+            target_code = 'A' if filters['targeting_type'] == 'Auto (A)' else 'M'
+            if campaign['targeting_type'] != target_code:
+                continue
+        
+        # Filter by match types
+        if filters['match_types']:
+            match_codes = []
+            for mt in filters['match_types']:
+                if 'Ex' in mt:
+                    match_codes.append('Ex')
+                elif 'Ph' in mt:
+                    match_codes.append('Ph')
+                elif 'Br' in mt:
+                    match_codes.append('Br')
+                elif 'PAT' in mt:
+                    match_codes.append('PAT')
+                elif 'CAT' in mt:
+                    match_codes.append('CAT')
+            
+            # Check if campaign has at least one of the selected match types
+            if not any(mc in campaign['match_types'] for mc in match_codes):
+                continue
+        
+        # Filter by placement
+        if filters['placement'] != 'All':
+            placement_code = None
+            if 'TOS' in filters['placement']:
+                placement_code = 'TOS'
+            elif 'PP' in filters['placement']:
+                placement_code = 'PP'
+            elif 'ROS' in filters['placement']:
+                placement_code = 'ROS'
+            
+            if placement_code and campaign['best_placement'] != placement_code:
+                continue
+        
+        # Filter by bidding strategy
+        if filters['bidding_strategy'] != 'All':
+            bidding_code = None
+            if 'Fix' in filters['bidding_strategy']:
+                bidding_code = 'Fix'
+            elif 'UnD' in filters['bidding_strategy']:
+                bidding_code = 'UnD'
+            elif 'DwnO' in filters['bidding_strategy']:
+                bidding_code = 'DwnO'
+            
+            if bidding_code and campaign['bidding_strategy'] != bidding_code:
+                continue
+        
+        # Filter by minimum ad groups
+        if len(campaign['ad_groups']) < filters['min_adgroups']:
+            continue
+        
+        filtered[campaign_id] = campaign
+    
+    return filtered
+
 def generate_campaign_name(campaign, naming_scheme, separators, custom_prefix):
     """Generate campaign name based on naming scheme"""
     name_parts = []
@@ -482,6 +546,18 @@ if st.session_state.step == 1:
         except Exception as e:
             st.error(f"Error processing file: {str(e)}")
 
+# Initialize filter options in session state
+if 'filter_targeting_type' not in st.session_state:
+    st.session_state.filter_targeting_type = 'Both'
+if 'filter_match_types' not in st.session_state:
+    st.session_state.filter_match_types = []
+if 'filter_placement' not in st.session_state:
+    st.session_state.filter_placement = 'All'
+if 'filter_bidding_strategy' not in st.session_state:
+    st.session_state.filter_bidding_strategy = 'All'
+if 'filter_min_adgroups' not in st.session_state:
+    st.session_state.filter_min_adgroups = 0
+
 # STEP 2: Naming Scheme Builder
 elif st.session_state.step == 2:
     st.header("Step 2: Build Your Naming Scheme")
@@ -527,6 +603,44 @@ elif st.session_state.step == 2:
             if 'bestPlacement' not in st.session_state.naming_scheme:
                 st.session_state.naming_scheme.append('bestPlacement')
                 st.rerun()
+        
+        st.divider()
+        
+        # Filtering Options
+        st.subheader("🔍 Filter Campaigns")
+        st.write("Apply filters to include only specific campaigns:")
+        
+        st.session_state.filter_targeting_type = st.selectbox(
+            "Targeting Type:",
+            options=['Both', 'Auto (A)', 'Manual (M)'],
+            index=0
+        )
+        
+        st.session_state.filter_match_types = st.multiselect(
+            "Match Types (select one or more):",
+            options=['Ex (Exact)', 'Ph (Phrase)', 'Br (Broad)', 'PAT (Product)', 'CAT (Category)'],
+            default=[]
+        )
+        
+        st.session_state.filter_placement = st.selectbox(
+            "Best Placement:",
+            options=['All', 'TOS (Top of Search)', 'PP (Product Page)', 'ROS (Rest of Search)'],
+            index=0
+        )
+        
+        st.session_state.filter_bidding_strategy = st.selectbox(
+            "Bidding Strategy:",
+            options=['All', 'Fix (Fixed)', 'UnD (Up and Down)', 'DwnO (Down Only)'],
+            index=0
+        )
+        
+        st.session_state.filter_min_adgroups = st.number_input(
+            "Minimum # of Ad Groups:",
+            min_value=0,
+            max_value=100,
+            value=0,
+            step=1
+        )
     
     with col2:
         st.subheader("Your Naming Scheme")
@@ -595,8 +709,23 @@ elif st.session_state.step == 2:
 elif st.session_state.step == 3:
     st.header("Step 3: Preview Changes")
     
-    campaigns = st.session_state.processed_data
-    campaign_list = list(campaigns.values())
+    # Apply filters
+    filters = {
+        'targeting_type': st.session_state.filter_targeting_type,
+        'match_types': st.session_state.filter_match_types,
+        'placement': st.session_state.filter_placement,
+        'bidding_strategy': st.session_state.filter_bidding_strategy,
+        'min_adgroups': st.session_state.filter_min_adgroups
+    }
+    
+    all_campaigns = st.session_state.processed_data
+    filtered_campaigns = filter_campaigns(all_campaigns, filters)
+    
+    # Show filter summary
+    if len(filtered_campaigns) < len(all_campaigns):
+        st.info(f"🔍 Showing {len(filtered_campaigns)} of {len(all_campaigns)} campaigns (filters applied)")
+    
+    campaign_list = list(filtered_campaigns.values())
     
     # Search
     search_col1, search_col2 = st.columns([3, 1])
@@ -682,9 +811,23 @@ elif st.session_state.step == 3:
 elif st.session_state.step == 4:
     st.header("Step 4: Export Bulk Update File")
     
-    campaigns = st.session_state.processed_data
+    # Apply same filters
+    filters = {
+        'targeting_type': st.session_state.filter_targeting_type,
+        'match_types': st.session_state.filter_match_types,
+        'placement': st.session_state.filter_placement,
+        'bidding_strategy': st.session_state.filter_bidding_strategy,
+        'min_adgroups': st.session_state.filter_min_adgroups
+    }
+    
+    all_campaigns = st.session_state.processed_data
+    campaigns = filter_campaigns(all_campaigns, filters)
+    
     total_campaigns = len(campaigns)
     total_ad_groups = sum(len(c['ad_groups']) for c in campaigns.values())
+    
+    if len(campaigns) < len(all_campaigns):
+        st.info(f"🔍 Exporting {len(campaigns)} of {len(all_campaigns)} campaigns (filters applied)")
     
     st.success(f"✓ Ready to export {total_campaigns} campaigns and {total_ad_groups} ad groups")
     
