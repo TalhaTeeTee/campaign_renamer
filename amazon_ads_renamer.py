@@ -32,8 +32,10 @@ if 'global_asin_performance' not in st.session_state:
     st.session_state.global_asin_performance = {}
 
 # Helper Functions
-def find_sp_sheet(excel_file):
+def find_sp_sheet(uploaded_file):
     """Find the Sponsored Products sheet in the Excel file"""
+    # Read the Excel file into a pandas ExcelFile object
+    excel_file = pd.ExcelFile(uploaded_file)
     sheet_names = excel_file.sheet_names
     
     for sheet_name in sheet_names:
