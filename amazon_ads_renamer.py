@@ -30,29 +30,49 @@ if 'sp_sheet_data' not in st.session_state:
     st.session_state.sp_sheet_data = None
 if 'global_asin_performance' not in st.session_state:
     st.session_state.global_asin_performance = {}
+if 'element_options' not in st.session_state:
+    st.session_state.element_options = {}
 
 # Helper Functions
 def find_sp_sheet(uploaded_file):
-    """Find the Sponsored Products sheet in the Excel file"""
+    """Find the Sponsored Products sheet in the Excel file and clean it"""
     # Read the Excel file into a pandas ExcelFile object
     excel_file = pd.ExcelFile(uploaded_file)
     sheet_names = excel_file.sheet_names
     
+    sp_sheet_name = None
+    sp_df = None
+    
     # First, try to find by sheet name
     for sheet_name in sheet_names:
         if 'Sponsored Products' in sheet_name:
-            df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
-            return sheet_name, df
+            sp_df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
+            sp_sheet_name = sheet_name
+            break
     
     # Fallback: check if column A contains "Sponsored Products"
-    for sheet_name in sheet_names:
-        df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
-        column_a = df.iloc[:, 0].dropna()
-        
-        if len(column_a) > 0 and any('Sponsored Products' in str(val) for val in column_a):
-            return sheet_name, df
+    if sp_df is None:
+        for sheet_name in sheet_names:
+            df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
+            column_a = df.iloc[:, 0].dropna()
+            
+            if len(column_a) > 0 and any('Sponsored Products' in str(val) for val in column_a):
+                sp_df = df
+                sp_sheet_name = sheet_name
+                break
     
-    return None, None
+    if sp_df is None:
+        return None, None
+    
+    # Clean the dataframe: Remove Negative keyword and Campaign Negative Keyword rows
+    # Column B (index 1) contains the Entity type
+    entities_to_remove = ['Negative keyword', 'Campaign Negative Keyword']
+    sp_df = sp_df[~sp_df.iloc[:, 1].isin(entities_to_remove)]
+    
+    # Reset index after filtering
+    sp_df = sp_df.reset_index(drop=True)
+    
+    return sp_sheet_name, sp_df
 
 def determine_match_code(match_type):
     """Determine match type code"""
@@ -361,70 +381,13 @@ def process_sponsored_products_sheet(df):
     
     return campaigns, global_asin_performance, errors
 
-def filter_campaigns(campaigns, filters):
-    """Filter campaigns based on user-selected criteria"""
-    filtered = {}
-    
-    for campaign_id, campaign in campaigns.items():
-        # Filter by targeting type
-        if filters['targeting_type'] != 'Both':
-            target_code = 'A' if filters['targeting_type'] == 'Auto (A)' else 'M'
-            if campaign['targeting_type'] != target_code:
-                continue
-        
-        # Filter by match types
-        if filters['match_types']:
-            match_codes = []
-            for mt in filters['match_types']:
-                if 'Ex' in mt:
-                    match_codes.append('Ex')
-                elif 'Ph' in mt:
-                    match_codes.append('Ph')
-                elif 'Br' in mt:
-                    match_codes.append('Br')
-                elif 'PAT' in mt:
-                    match_codes.append('PAT')
-                elif 'CAT' in mt:
-                    match_codes.append('CAT')
-            
-            # Check if campaign has at least one of the selected match types
-            if not any(mc in campaign['match_types'] for mc in match_codes):
-                continue
-        
-        # Filter by placement
-        if filters['placement'] != 'All':
-            placement_code = None
-            if 'TOS' in filters['placement']:
-                placement_code = 'TOS'
-            elif 'PP' in filters['placement']:
-                placement_code = 'PP'
-            elif 'ROS' in filters['placement']:
-                placement_code = 'ROS'
-            
-            if placement_code and campaign['best_placement'] != placement_code:
-                continue
-        
-        # Filter by bidding strategy
-        if filters['bidding_strategy'] != 'All':
-            bidding_code = None
-            if 'Fix' in filters['bidding_strategy']:
+def generate_campaign_name(campaign, naming_scheme, separators, custom_prefix):Fix' in filters['bidding_strategy']:
                 bidding_code = 'Fix'
             elif 'UnD' in filters['bidding_strategy']:
                 bidding_code = 'UnD'
             elif 'DwnO' in filters['bidding_strategy']:
                 bidding_code = 'DwnO'
             
-            if bidding_code and campaign['bidding_strategy'] != bidding_code:
-                continue
-        
-        # Filter by minimum ad groups
-        if len(campaign['ad_groups']) < filters['min_adgroups']:
-            continue
-        
-        filtered[campaign_id] = campaign
-    
-    return filtered
-
 def generate_campaign_name(campaign, naming_scheme, separators, custom_prefix):
     """Generate campaign name based on naming scheme"""
     name_parts = []
@@ -435,27 +398,51 @@ def generate_campaign_name(campaign, naming_scheme, separators, custom_prefix):
         if element == 'prefix':
             part = custom_prefix
         elif element == 'targetingType':
-            part = campaign['targeting_type']
-        elif element == 'matchTypes':
-            if campaign['targeting_type'] == 'A':
-                part = 'Auto'
+            # Use custom selection if available, otherwise use actual campaign data
+            if 'targetingType' in st.session_state.element_options:
+                part = st.session_state.element_options['targetingType']
             else:
-                match_types = sorted(list(campaign['match_types']))
+                part = campaign['targeting_type']
+        elif element == 'matchTypes':
+            # Use custom selection if available
+            if 'matchTypes' in st.session_state.element_options and st.session_state.element_options['matchTypes']:
+                match_types = st.session_state.element_options['matchTypes']
                 highlighted = []
                 for mt in match_types:
-                    if mt == campaign['best_match_type']:
+                    if mt == campaign.get('best_match_type'):
                         highlighted.append(f"*{mt}*")
                     else:
                         highlighted.append(mt)
                 part = f"[{','.join(highlighted)}]"
+            else:
+                # Default behavior
+                if campaign['targeting_type'] == 'A':
+                    part = 'Auto'
+                else:
+                    match_types = sorted(list(campaign['match_types']))
+                    highlighted = []
+                    for mt in match_types:
+                        if mt == campaign['best_match_type']:
+                            highlighted.append(f"*{mt}*")
+                        else:
+                            highlighted.append(mt)
+                    part = f"[{','.join(highlighted)}]"
         elif element == 'adGroupCount':
             part = f"{len(campaign['ad_groups'])}AdG"
         elif element == 'bestAsin':
             part = campaign['best_asin'] or 'N/A'
         elif element == 'biddingStrategy':
-            part = campaign['bidding_strategy']
+            # Use custom selection if available, otherwise use actual campaign data
+            if 'biddingStrategy' in st.session_state.element_options:
+                part = st.session_state.element_options['biddingStrategy']
+            else:
+                part = campaign['bidding_strategy']
         elif element == 'bestPlacement':
-            part = campaign['best_placement']
+            # Use custom selection if available, otherwise use actual campaign data
+            if 'bestPlacement' in st.session_state.element_options:
+                part = st.session_state.element_options['bestPlacement']
+            else:
+                part = campaign['best_placement']
         
         name_parts.append(part)
         
@@ -546,18 +533,6 @@ if st.session_state.step == 1:
         except Exception as e:
             st.error(f"Error processing file: {str(e)}")
 
-# Initialize filter options in session state
-if 'filter_targeting_type' not in st.session_state:
-    st.session_state.filter_targeting_type = 'Both'
-if 'filter_match_types' not in st.session_state:
-    st.session_state.filter_match_types = []
-if 'filter_placement' not in st.session_state:
-    st.session_state.filter_placement = 'All'
-if 'filter_bidding_strategy' not in st.session_state:
-    st.session_state.filter_bidding_strategy = 'All'
-if 'filter_min_adgroups' not in st.session_state:
-    st.session_state.filter_min_adgroups = 0
-
 # STEP 2: Naming Scheme Builder
 elif st.session_state.step == 2:
     st.header("Step 2: Build Your Naming Scheme")
@@ -577,6 +552,8 @@ elif st.session_state.step == 2:
         if st.button("➕ Targeting Type (A/M)", use_container_width=True):
             if 'targetingType' not in st.session_state.naming_scheme:
                 st.session_state.naming_scheme.append('targetingType')
+                if 'targetingType' not in st.session_state.element_options:
+                    st.session_state.element_options['targetingType'] = 'A'
                 st.rerun()
         
         if st.button("➕ Match Types [Ex,Br,PAT]", use_container_width=True):
@@ -597,50 +574,16 @@ elif st.session_state.step == 2:
         if st.button("➕ Bidding Strategy", use_container_width=True):
             if 'biddingStrategy' not in st.session_state.naming_scheme:
                 st.session_state.naming_scheme.append('biddingStrategy')
+                if 'biddingStrategy' not in st.session_state.element_options:
+                    st.session_state.element_options['biddingStrategy'] = 'Fix'
                 st.rerun()
         
         if st.button("➕ Best Placement", use_container_width=True):
             if 'bestPlacement' not in st.session_state.naming_scheme:
                 st.session_state.naming_scheme.append('bestPlacement')
+                if 'bestPlacement' not in st.session_state.element_options:
+                    st.session_state.element_options['bestPlacement'] = 'TOS'
                 st.rerun()
-        
-        st.divider()
-        
-        # Filtering Options
-        st.subheader("🔍 Filter Campaigns")
-        st.write("Apply filters to include only specific campaigns:")
-        
-        st.session_state.filter_targeting_type = st.selectbox(
-            "Targeting Type:",
-            options=['Both', 'Auto (A)', 'Manual (M)'],
-            index=0
-        )
-        
-        st.session_state.filter_match_types = st.multiselect(
-            "Match Types (select one or more):",
-            options=['Ex (Exact)', 'Ph (Phrase)', 'Br (Broad)', 'PAT (Product)', 'CAT (Category)'],
-            default=[]
-        )
-        
-        st.session_state.filter_placement = st.selectbox(
-            "Best Placement:",
-            options=['All', 'TOS (Top of Search)', 'PP (Product Page)', 'ROS (Rest of Search)'],
-            index=0
-        )
-        
-        st.session_state.filter_bidding_strategy = st.selectbox(
-            "Bidding Strategy:",
-            options=['All', 'Fix (Fixed)', 'UnD (Up and Down)', 'DwnO (Down Only)'],
-            index=0
-        )
-        
-        st.session_state.filter_min_adgroups = st.number_input(
-            "Minimum # of Ad Groups:",
-            min_value=0,
-            max_value=100,
-            value=0,
-            step=1
-        )
     
     with col2:
         st.subheader("Your Naming Scheme")
@@ -650,19 +593,46 @@ elif st.session_state.step == 2:
         else:
             for idx, element in enumerate(st.session_state.naming_scheme):
                 with st.container():
+                    st.write(f"**{idx + 1}. {element.replace('T', ' T').replace('C', ' C').replace('A', ' A').replace('S', ' S').replace('G', ' G')}**")
+                    
                     elem_col1, elem_col2, elem_col3 = st.columns([3, 2, 1])
                     
                     with elem_col1:
-                        element_labels = {
-                            'prefix': f"Prefix ({st.session_state.custom_prefix})",
-                            'targetingType': "Targeting Type",
-                            'matchTypes': "Match Types",
-                            'adGroupCount': "Ad Group Count",
-                            'bestAsin': "Best ASIN",
-                            'biddingStrategy': "Bidding Strategy",
-                            'bestPlacement': "Best Placement"
-                        }
-                        st.write(f"**{idx + 1}.** {element_labels.get(element, element)}")
+                        # Add dropdown menus for customizable elements
+                        if element == 'targetingType':
+                            st.session_state.element_options['targetingType'] = st.selectbox(
+                                "Select type:",
+                                options=['A', 'M', 'Auto', 'Manual'],
+                                index=0,
+                                key=f"opt_targeting_{idx}"
+                            )
+                        elif element == 'matchTypes':
+                            st.session_state.element_options['matchTypes'] = st.multiselect(
+                                "Select match types:",
+                                options=['Ex', 'Ph', 'Br', 'PAT', 'CAT'],
+                                default=['Ex', 'Br'],
+                                key=f"opt_match_{idx}"
+                            )
+                        elif element == 'biddingStrategy':
+                            st.session_state.element_options['biddingStrategy'] = st.selectbox(
+                                "Select strategy:",
+                                options=['Fix', 'UnD', 'DwnO'],
+                                index=0,
+                                key=f"opt_bidding_{idx}"
+                            )
+                        elif element == 'bestPlacement':
+                            st.session_state.element_options['bestPlacement'] = st.selectbox(
+                                "Select placement:",
+                                options=['TOS', 'PP', 'ROS'],
+                                index=0,
+                                key=f"opt_placement_{idx}"
+                            )
+                        elif element == 'prefix':
+                            st.write(f"Value: `{st.session_state.custom_prefix}`")
+                        elif element == 'bestAsin':
+                            st.write("Value: `Best performing ASIN`")
+                        elif element == 'adGroupCount':
+                            st.write("Value: `Number of ad groups`")
                     
                     with elem_col2:
                         if idx < len(st.session_state.naming_scheme) - 1:
@@ -679,7 +649,11 @@ elif st.session_state.step == 2:
                             st.session_state.naming_scheme.pop(idx)
                             if idx in st.session_state.separators:
                                 del st.session_state.separators[idx]
+                            if element in st.session_state.element_options:
+                                del st.session_state.element_options[element]
                             st.rerun()
+                    
+                    st.divider()
             
             # Preview
             if st.session_state.processed_data:
@@ -709,23 +683,8 @@ elif st.session_state.step == 2:
 elif st.session_state.step == 3:
     st.header("Step 3: Preview Changes")
     
-    # Apply filters
-    filters = {
-        'targeting_type': st.session_state.filter_targeting_type,
-        'match_types': st.session_state.filter_match_types,
-        'placement': st.session_state.filter_placement,
-        'bidding_strategy': st.session_state.filter_bidding_strategy,
-        'min_adgroups': st.session_state.filter_min_adgroups
-    }
-    
-    all_campaigns = st.session_state.processed_data
-    filtered_campaigns = filter_campaigns(all_campaigns, filters)
-    
-    # Show filter summary
-    if len(filtered_campaigns) < len(all_campaigns):
-        st.info(f"🔍 Showing {len(filtered_campaigns)} of {len(all_campaigns)} campaigns (filters applied)")
-    
-    campaign_list = list(filtered_campaigns.values())
+    campaigns = st.session_state.processed_data
+    campaign_list = list(campaigns.values())
     
     # Search
     search_col1, search_col2 = st.columns([3, 1])
@@ -811,23 +770,9 @@ elif st.session_state.step == 3:
 elif st.session_state.step == 4:
     st.header("Step 4: Export Bulk Update File")
     
-    # Apply same filters
-    filters = {
-        'targeting_type': st.session_state.filter_targeting_type,
-        'match_types': st.session_state.filter_match_types,
-        'placement': st.session_state.filter_placement,
-        'bidding_strategy': st.session_state.filter_bidding_strategy,
-        'min_adgroups': st.session_state.filter_min_adgroups
-    }
-    
-    all_campaigns = st.session_state.processed_data
-    campaigns = filter_campaigns(all_campaigns, filters)
-    
+    campaigns = st.session_state.processed_data
     total_campaigns = len(campaigns)
     total_ad_groups = sum(len(c['ad_groups']) for c in campaigns.values())
-    
-    if len(campaigns) < len(all_campaigns):
-        st.info(f"🔍 Exporting {len(campaigns)} of {len(all_campaigns)} campaigns (filters applied)")
     
     st.success(f"✓ Ready to export {total_campaigns} campaigns and {total_ad_groups} ad groups")
     
@@ -881,4 +826,5 @@ elif st.session_state.step == 4:
             st.session_state.current_page = 1
             st.session_state.sp_sheet_data = None
             st.session_state.global_asin_performance = {}
+            st.session_state.element_options = {}
             st.rerun()
