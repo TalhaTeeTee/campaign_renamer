@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from collections import defaultdict
 from io import BytesIO
-import re
 
 # Page configuration
 st.set_page_config(
@@ -30,8 +29,14 @@ if 'sp_sheet_data' not in st.session_state:
     st.session_state.sp_sheet_data = None
 if 'global_asin_performance' not in st.session_state:
     st.session_state.global_asin_performance = {}
-if 'element_options' not in st.session_state:
-    st.session_state.element_options = {}
+if 'preview_options' not in st.session_state:
+    st.session_state.preview_options = {
+        'targetingType': 'M',
+        'matchTypes': ['Ex', 'Br'],
+        'biddingStrategy': 'Fix',
+        'bestPlacement': 'TOS',
+        'adGroupCount': 3
+    }
 
 # Helper Functions
 def find_sp_sheet(uploaded_file):
@@ -381,61 +386,71 @@ def process_sponsored_products_sheet(df):
     
     return campaigns, global_asin_performance, errors
 
-def generate_campaign_name(campaign, naming_scheme, separators, custom_prefix):
-    """Generate campaign name based on naming scheme"""
+def generate_preview_name(naming_scheme, separators, custom_prefix, preview_options):
+    """Generate preview name using preview options for visualization"""
     name_parts = []
-    
+
     for idx, element in enumerate(naming_scheme):
         part = ''
-        
+
         if element == 'prefix':
             part = custom_prefix
         elif element == 'targetingType':
-            # Use custom selection if available, otherwise use actual campaign data
-            if 'targetingType' in st.session_state.element_options:
-                part = st.session_state.element_options['targetingType']
-            else:
-                part = campaign['targeting_type']
+            part = preview_options.get('targetingType', 'M')
         elif element == 'matchTypes':
-            # Use custom selection if available
-            if 'matchTypes' in st.session_state.element_options and st.session_state.element_options['matchTypes']:
-                match_types = st.session_state.element_options['matchTypes']
+            if preview_options.get('targetingType', 'M') == 'A':
+                part = 'Auto'
+            else:
+                match_types = preview_options.get('matchTypes', ['Ex', 'Br'])
+                part = f"[{','.join(match_types)}]"
+        elif element == 'adGroupCount':
+            count = preview_options.get('adGroupCount', 1)
+            part = f"{count}AdG"
+        elif element == 'bestAsin':
+            part = 'B0XXXXXXXX'
+        elif element == 'biddingStrategy':
+            part = preview_options.get('biddingStrategy', 'Fix')
+        elif element == 'bestPlacement':
+            part = preview_options.get('bestPlacement', 'TOS')
+
+        name_parts.append(part)
+
+        if idx < len(naming_scheme) - 1:
+            name_parts.append(separators.get(idx, '-'))
+
+    return ''.join(name_parts)
+
+def generate_campaign_name(campaign, naming_scheme, separators, custom_prefix):
+    """Generate campaign name based on naming scheme"""
+    name_parts = []
+
+    for idx, element in enumerate(naming_scheme):
+        part = ''
+
+        if element == 'prefix':
+            part = custom_prefix
+        elif element == 'targetingType':
+            part = campaign['targeting_type']
+        elif element == 'matchTypes':
+            if campaign['targeting_type'] == 'A':
+                part = 'Auto'
+            else:
+                match_types = sorted(list(campaign['match_types']))
                 highlighted = []
                 for mt in match_types:
-                    if mt == campaign.get('best_match_type'):
+                    if mt == campaign['best_match_type']:
                         highlighted.append(f"*{mt}*")
                     else:
                         highlighted.append(mt)
                 part = f"[{','.join(highlighted)}]"
-            else:
-                # Default behavior
-                if campaign['targeting_type'] == 'A':
-                    part = 'Auto'
-                else:
-                    match_types = sorted(list(campaign['match_types']))
-                    highlighted = []
-                    for mt in match_types:
-                        if mt == campaign['best_match_type']:
-                            highlighted.append(f"*{mt}*")
-                        else:
-                            highlighted.append(mt)
-                    part = f"[{','.join(highlighted)}]"
         elif element == 'adGroupCount':
             part = f"{len(campaign['ad_groups'])}AdG"
         elif element == 'bestAsin':
             part = campaign['best_asin'] or 'N/A'
         elif element == 'biddingStrategy':
-            # Use custom selection if available, otherwise use actual campaign data
-            if 'biddingStrategy' in st.session_state.element_options:
-                part = st.session_state.element_options['biddingStrategy']
-            else:
-                part = campaign['bidding_strategy']
+            part = campaign['bidding_strategy']
         elif element == 'bestPlacement':
-            # Use custom selection if available, otherwise use actual campaign data
-            if 'bestPlacement' in st.session_state.element_options:
-                part = st.session_state.element_options['bestPlacement']
-            else:
-                part = campaign['best_placement']
+            part = campaign['best_placement']
         
         name_parts.append(part)
         
@@ -449,6 +464,218 @@ def generate_adgroup_name(ad_group):
     best_asin = ad_group.get('best_asin') or 'N/A'
     best_match = ad_group.get('best_match_type') or 'N/A'
     return f"{best_asin}-{best_match}"
+
+def generate_nomenclature_document(naming_scheme, separators, custom_prefix, campaigns):
+    """Generate a comprehensive nomenclature document explaining the naming scheme"""
+
+    # Build the format string
+    format_parts = []
+    for idx, element in enumerate(naming_scheme):
+        if element == 'prefix':
+            format_parts.append(f"[{custom_prefix}]")
+        elif element == 'targetingType':
+            format_parts.append("[A/M]")
+        elif element == 'matchTypes':
+            format_parts.append("[MatchTypes]")
+        elif element == 'adGroupCount':
+            format_parts.append("[#AdG]")
+        elif element == 'bestAsin':
+            format_parts.append("[BestASIN]")
+        elif element == 'biddingStrategy':
+            format_parts.append("[Strategy]")
+        elif element == 'bestPlacement':
+            format_parts.append("[Placement]")
+
+        if idx < len(naming_scheme) - 1:
+            format_parts.append(separators.get(idx, '-'))
+
+    format_string = ''.join(format_parts)
+
+    # Generate example campaigns
+    example_campaigns = []
+    if campaigns:
+        campaign_list = list(campaigns.values())[:3]  # Get up to 3 examples
+        for camp in campaign_list:
+            old_name = camp['name']
+            new_name = generate_campaign_name(camp, naming_scheme, separators, custom_prefix)
+            example_campaigns.append({
+                'old': old_name,
+                'new': new_name,
+                'targeting': 'Auto' if camp['targeting_type'] == 'A' else 'Manual',
+                'ad_groups': len(camp['ad_groups'])
+            })
+
+    # Create the document content
+    doc = f"""# AMAZON ADS CAMPAIGN NOMENCLATURE GUIDE
+Generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+================================================================================
+CAMPAIGN NAMING SCHEME
+================================================================================
+
+Your Custom Format:
+{format_string}
+
+--------------------------------------------------------------------------------
+NAMING ELEMENTS EXPLANATION
+--------------------------------------------------------------------------------
+
+"""
+
+    # Add explanation for each element
+    for idx, element in enumerate(naming_scheme):
+        doc += f"{idx + 1}. "
+
+        if element == 'prefix':
+            doc += f"PREFIX: '{custom_prefix}'\n"
+            doc += f"   - A fixed identifier for all Sponsored Product Campaigns\n"
+            doc += f"   - Helps you quickly identify campaigns in Amazon Ads console\n"
+
+        elif element == 'targetingType':
+            doc += "TARGETING TYPE\n"
+            doc += "   - A = Auto Targeting (Amazon automatically targets keywords)\n"
+            doc += "   - M = Manual Targeting (You select specific keywords or products)\n"
+
+        elif element == 'matchTypes':
+            doc += "MATCH TYPES\n"
+            doc += "   - Shows all match types used in the campaign\n"
+            doc += "   - Auto: Campaign uses automatic targeting\n"
+            doc += "   - Manual campaigns show:\n"
+            doc += "     • Ex = Exact Match\n"
+            doc += "     • Ph = Phrase Match\n"
+            doc += "     • Br = Broad Match\n"
+            doc += "     • PAT = Product ASIN Targeting\n"
+            doc += "     • CAT = Category Targeting\n"
+            doc += "   - Best performing match type is marked with asterisks (*)\n"
+            doc += "   - Example: [Ex,*Br*,Ph] means Broad is performing best\n"
+
+        elif element == 'adGroupCount':
+            doc += "AD GROUP COUNT\n"
+            doc += "   - Shows the number of ad groups in this campaign\n"
+            doc += "   - Format: #AdG (e.g., 3AdG = 3 ad groups)\n"
+            doc += "   - Helps you understand campaign structure at a glance\n"
+
+        elif element == 'bestAsin':
+            doc += "BEST ASIN\n"
+            doc += "   - The best performing product (ASIN) in this campaign\n"
+            doc += "   - Determined by: Orders > Conversion Rate > ROAS\n"
+            doc += "   - If no orders: Uses Clicks > Impressions\n"
+            doc += "   - If no campaign data: Uses global ASIN performance\n"
+
+        elif element == 'biddingStrategy':
+            doc += "BIDDING STRATEGY\n"
+            doc += "   - Fix = Fixed Bids\n"
+            doc += "   - DwnO = Dynamic Bids - Down Only\n"
+            doc += "   - UnD = Dynamic Bids - Up and Down\n"
+
+        elif element == 'bestPlacement':
+            doc += "BEST PLACEMENT\n"
+            doc += "   - Shows which ad placement is performing best\n"
+            doc += "   - TOS = Top of Search (first page)\n"
+            doc += "   - PP = Product Pages\n"
+            doc += "   - ROS = Rest of Search\n"
+            doc += "   - Determined by: Orders > ROAS > Conversion Rate\n"
+
+        if idx < len(naming_scheme) - 1:
+            separator = separators.get(idx, '-')
+            doc += f"\n   Separator: '{separator}'\n"
+
+        doc += "\n"
+
+    doc += """
+================================================================================
+AD GROUP NAMING SCHEME
+================================================================================
+
+Format: [BestASIN]-[BestMatchType]
+
+Components:
+1. Best ASIN: The top performing product in the ad group
+2. Best Match Type: The best performing match type in the ad group
+   - Uses same logic as campaign level (Orders > Conv Rate > ROAS)
+
+Example: B07XYZ1234-Ex
+   - B07XYZ1234 is the best performing ASIN
+   - Ex means Exact match is performing best
+
+"""
+
+    # Add examples if available
+    if example_campaigns:
+        doc += """================================================================================
+EXAMPLE CAMPAIGNS FROM YOUR DATA
+================================================================================
+
+"""
+        for i, ex in enumerate(example_campaigns, 1):
+            doc += f"Example {i}:\n"
+            doc += f"  OLD NAME: {ex['old']}\n"
+            doc += f"  NEW NAME: {ex['new']}\n"
+            doc += f"  Targeting: {ex['targeting']}\n"
+            doc += f"  Ad Groups: {ex['ad_groups']}\n\n"
+
+    doc += """================================================================================
+PERFORMANCE RANKING LOGIC
+================================================================================
+
+How "Best" Elements are Determined:
+
+1. BEST ASIN (Campaign & Ad Group Level):
+   - Primary: Highest Orders
+   - Secondary: Highest Conversion Rate
+   - Tertiary: Highest ROAS
+   - Fallback (no orders): Highest Clicks > Impressions
+   - Final Fallback: Global ASIN performance across all campaigns
+
+2. BEST MATCH TYPE (Campaign & Ad Group Level):
+   - Primary: Highest Orders
+   - Secondary: Highest Conversion Rate
+   - Tertiary: Highest ROAS
+
+3. BEST PLACEMENT (Campaign Level):
+   - Primary: Highest Orders
+   - Secondary: Highest ROAS
+   - Tertiary: Highest Conversion Rate
+   - Fallback (no orders): Highest Clicks > Impressions
+
+================================================================================
+IMPORTANT NOTES
+================================================================================
+
+• Each campaign name is unique and data-driven
+• Names reflect actual campaign performance and structure
+• The naming scheme is a FORMAT - each campaign uses its own data
+• Asterisks (*) in match types indicate the best performer
+• All metrics are calculated from your uploaded bulk report data
+• Campaign names update based on current performance when regenerated
+
+================================================================================
+GLOSSARY
+================================================================================
+
+ASIN: Amazon Standard Identification Number (unique product identifier)
+ROAS: Return on Ad Spend (Revenue ÷ Spend)
+Conversion Rate: Orders ÷ Clicks
+Orders: Number of purchases attributed to the ad
+Clicks: Number of times the ad was clicked
+Impressions: Number of times the ad was displayed
+
+================================================================================
+SUPPORT
+================================================================================
+
+For questions or issues with the renaming tool:
+- Review your naming scheme in Step 2
+- Check the preview to understand the format
+- Verify your bulk report contains complete data
+- Use the error log if any warnings were generated
+
+Generated by Amazon Ads Campaign Renamer Tool
+https://github.com/anthropics/claude-code
+================================================================================
+"""
+
+    return doc
 
 def create_bulk_file(campaigns, naming_scheme, separators, custom_prefix):
     """Create bulk update file"""
@@ -545,8 +772,6 @@ elif st.session_state.step == 2:
         if st.button("➕ Targeting Type (A/M)", use_container_width=True):
             if 'targetingType' not in st.session_state.naming_scheme:
                 st.session_state.naming_scheme.append('targetingType')
-                if 'targetingType' not in st.session_state.element_options:
-                    st.session_state.element_options['targetingType'] = 'A'
                 st.rerun()
         
         if st.button("➕ Match Types [Ex,Br,PAT]", use_container_width=True):
@@ -567,67 +792,98 @@ elif st.session_state.step == 2:
         if st.button("➕ Bidding Strategy", use_container_width=True):
             if 'biddingStrategy' not in st.session_state.naming_scheme:
                 st.session_state.naming_scheme.append('biddingStrategy')
-                if 'biddingStrategy' not in st.session_state.element_options:
-                    st.session_state.element_options['biddingStrategy'] = 'Fix'
                 st.rerun()
-        
+
         if st.button("➕ Best Placement", use_container_width=True):
             if 'bestPlacement' not in st.session_state.naming_scheme:
                 st.session_state.naming_scheme.append('bestPlacement')
-                if 'bestPlacement' not in st.session_state.element_options:
-                    st.session_state.element_options['bestPlacement'] = 'TOS'
                 st.rerun()
     
     with col2:
         st.subheader("Your Naming Scheme")
-        
+
+        # Create placeholder for preview (will be filled after widgets are rendered)
+        preview_placeholder = st.empty()
+        preview_caption_placeholder = st.empty()
+        preview_divider_placeholder = st.empty()
+
         if not st.session_state.naming_scheme:
             st.info("Add elements from the left to build your naming scheme")
         else:
             for idx, element in enumerate(st.session_state.naming_scheme):
                 with st.container():
-                    st.write(f"**{idx + 1}. {element.replace('T', ' T').replace('C', ' C').replace('A', ' A').replace('S', ' S').replace('G', ' G')}**")
+                    # Create a row for the element
+                    elem_row = st.columns([4, 2, 1])
                     
-                    elem_col1, elem_col2, elem_col3 = st.columns([3, 2, 1])
+                    # Element name and preview selector
+                    with elem_row[0]:
+                        element_display_name = {
+                            'prefix': 'Prefix',
+                            'targetingType': 'Targeting Type',
+                            'matchTypes': 'Match Types',
+                            'adGroupCount': 'Ad Group Count',
+                            'bestAsin': 'Best ASIN',
+                            'biddingStrategy': 'Bidding Strategy',
+                            'bestPlacement': 'Best Placement'
+                        }
+
+                        # Show element name with expander for configurable preview options
+                        if element in ['targetingType', 'matchTypes', 'biddingStrategy', 'bestPlacement', 'adGroupCount']:
+                            with st.expander(f"**{idx + 1}. {element_display_name.get(element, element)}**", expanded=False):
+                                st.caption("_Preview settings (for visualization only):_")
+
+                                if element == 'targetingType':
+                                    st.session_state.preview_options['targetingType'] = st.selectbox(
+                                        "Preview as:",
+                                        options=['A', 'M'],
+                                        index=0 if st.session_state.preview_options.get('targetingType', 'M') == 'A' else 1,
+                                        key=f"prev_targeting_{idx}"
+                                    )
+
+                                elif element == 'matchTypes':
+                                    # Disable if targeting type is Auto
+                                    is_auto = st.session_state.preview_options.get('targetingType', 'M') == 'A'
+                                    if is_auto:
+                                        st.info("Match Types are set to 'Auto' when Targeting Type is Auto")
+                                    else:
+                                        st.session_state.preview_options['matchTypes'] = st.multiselect(
+                                            "Preview match types:",
+                                            options=['Ex', 'Ph', 'Br', 'PAT', 'CAT'],
+                                            default=st.session_state.preview_options.get('matchTypes', ['Ex', 'Br']),
+                                            key=f"prev_match_{idx}"
+                                        )
+
+                                elif element == 'biddingStrategy':
+                                    st.session_state.preview_options['biddingStrategy'] = st.selectbox(
+                                        "Preview as:",
+                                        options=['Fix', 'UnD', 'DwnO'],
+                                        index=['Fix', 'UnD', 'DwnO'].index(st.session_state.preview_options.get('biddingStrategy', 'Fix')),
+                                        key=f"prev_bidding_{idx}"
+                                    )
+
+                                elif element == 'bestPlacement':
+                                    st.session_state.preview_options['bestPlacement'] = st.selectbox(
+                                        "Preview as:",
+                                        options=['TOS', 'PP', 'ROS'],
+                                        index=['TOS', 'PP', 'ROS'].index(st.session_state.preview_options.get('bestPlacement', 'TOS')),
+                                        key=f"prev_placement_{idx}"
+                                    )
+
+                                elif element == 'adGroupCount':
+                                    st.session_state.preview_options['adGroupCount'] = st.number_input(
+                                        "Preview count:",
+                                        min_value=1,
+                                        max_value=999,
+                                        value=st.session_state.preview_options.get('adGroupCount', 3),
+                                        step=1,
+                                        key=f"prev_adgcount_{idx}"
+                                    )
+                        else:
+                            # For non-configurable elements
+                            st.write(f"**{idx + 1}. {element_display_name.get(element, element)}**")
                     
-                    with elem_col1:
-                        # Add dropdown menus for customizable elements
-                        if element == 'targetingType':
-                            st.session_state.element_options['targetingType'] = st.selectbox(
-                                "Select type:",
-                                options=['A', 'M', 'Auto', 'Manual'],
-                                index=0,
-                                key=f"opt_targeting_{idx}"
-                            )
-                        elif element == 'matchTypes':
-                            st.session_state.element_options['matchTypes'] = st.multiselect(
-                                "Select match types:",
-                                options=['Ex', 'Ph', 'Br', 'PAT', 'CAT'],
-                                default=['Ex', 'Br'],
-                                key=f"opt_match_{idx}"
-                            )
-                        elif element == 'biddingStrategy':
-                            st.session_state.element_options['biddingStrategy'] = st.selectbox(
-                                "Select strategy:",
-                                options=['Fix', 'UnD', 'DwnO'],
-                                index=0,
-                                key=f"opt_bidding_{idx}"
-                            )
-                        elif element == 'bestPlacement':
-                            st.session_state.element_options['bestPlacement'] = st.selectbox(
-                                "Select placement:",
-                                options=['TOS', 'PP', 'ROS'],
-                                index=0,
-                                key=f"opt_placement_{idx}"
-                            )
-                        elif element == 'prefix':
-                            st.write(f"Value: `{st.session_state.custom_prefix}`")
-                        elif element == 'bestAsin':
-                            st.write("Value: `Best performing ASIN`")
-                        elif element == 'adGroupCount':
-                            st.write("Value: `Number of ad groups`")
-                    
-                    with elem_col2:
+                    # Separator input
+                    with elem_row[1]:
                         if idx < len(st.session_state.naming_scheme) - 1:
                             sep = st.text_input(
                                 "Separator:",
@@ -637,28 +893,25 @@ elif st.session_state.step == 2:
                             )
                             st.session_state.separators[idx] = sep
                     
-                    with elem_col3:
+                    # Delete button
+                    with elem_row[2]:
                         if st.button("🗑️", key=f"del_{idx}"):
                             st.session_state.naming_scheme.pop(idx)
                             if idx in st.session_state.separators:
                                 del st.session_state.separators[idx]
-                            if element in st.session_state.element_options:
-                                del st.session_state.element_options[element]
                             st.rerun()
-                    
-                    st.divider()
-            
-            # Preview
-            if st.session_state.processed_data:
-                first_campaign = list(st.session_state.processed_data.values())[0]
-                preview_name = generate_campaign_name(
-                    first_campaign,
-                    st.session_state.naming_scheme,
-                    st.session_state.separators,
-                    st.session_state.custom_prefix
-                )
-                st.success(f"**Preview:** `{preview_name}`")
-    
+
+            # Now render the preview at the top using the placeholders
+            preview_name = generate_preview_name(
+                st.session_state.naming_scheme,
+                st.session_state.separators,
+                st.session_state.custom_prefix,
+                st.session_state.preview_options
+            )
+            preview_placeholder.success(f"**Preview:** `{preview_name}`")
+            preview_caption_placeholder.caption("_This is a sample preview. Each campaign will use its own actual data._")
+            preview_divider_placeholder.divider()
+
     st.divider()
     
     col_back, col_next = st.columns(2)
@@ -788,17 +1041,45 @@ elif st.session_state.step == 4:
         bulk_df.to_excel(writer, index=False, header=False, sheet_name='Sponsored Products')
     output.seek(0)
     
-    st.download_button(
-        label="📥 Download Bulk Update File",
-        data=output,
-        file_name="amazon_ads_bulk_update.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary"
-    )
-    
+    # Download buttons in columns
+    download_col1, download_col2 = st.columns(2)
+
+    with download_col1:
+        st.download_button(
+            label="📥 Download Bulk Update File",
+            data=output,
+            file_name="amazon_ads_bulk_update.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True
+        )
+
+    with download_col2:
+        # Generate nomenclature document
+        nomenclature_doc = generate_nomenclature_document(
+            st.session_state.naming_scheme,
+            st.session_state.separators,
+            st.session_state.custom_prefix,
+            campaigns
+        )
+
+        st.download_button(
+            label="📄 Download Nomenclature Guide",
+            data=nomenclature_doc,
+            file_name="naming_scheme_guide.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+
+    st.info("💡 **Tip:** Download both files! The Nomenclature Guide explains your naming scheme in detail.")
+
     # Preview file contents
-    with st.expander("👁️ Preview File Contents (First 20 rows)"):
+    with st.expander("👁️ Preview Bulk File Contents (First 20 rows)"):
         st.dataframe(bulk_df.head(20), use_container_width=True)
+
+    # Preview nomenclature document
+    with st.expander("📖 Preview Nomenclature Guide"):
+        st.text(nomenclature_doc)
     
     st.divider()
     
@@ -819,5 +1100,11 @@ elif st.session_state.step == 4:
             st.session_state.current_page = 1
             st.session_state.sp_sheet_data = None
             st.session_state.global_asin_performance = {}
-            st.session_state.element_options = {}
+            st.session_state.preview_options = {
+                'targetingType': 'M',
+                'matchTypes': ['Ex', 'Br'],
+                'biddingStrategy': 'Fix',
+                'bestPlacement': 'TOS',
+                'adGroupCount': 3
+            }
             st.rerun()
