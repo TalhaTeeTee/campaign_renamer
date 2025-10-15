@@ -37,8 +37,101 @@ if 'preview_options' not in st.session_state:
         'bestPlacement': 'TOS',
         'adGroupCount': 3
     }
+if 'unique_asins' not in st.session_state:
+    st.session_state.unique_asins = []
+if 'asin_short_names' not in st.session_state:
+    st.session_state.asin_short_names = {}
+if 'use_short_names' not in st.session_state:
+    st.session_state.use_short_names = False
 
 # Helper Functions
+def extract_unique_asins(campaigns):
+    """Extract all unique advertised ASINs from campaigns"""
+    unique_asins = set()
+    for campaign in campaigns.values():
+        unique_asins.update(campaign['all_asins'])
+    return sorted(list(unique_asins))
+
+def create_asin_template(unique_asins):
+    """Create ASIN short names template file"""
+    template_df = pd.DataFrame({
+        'ASINs': unique_asins,
+        'Short_Name': [''] * len(unique_asins)
+    })
+
+    # Convert to Excel with data validation
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        template_df.to_excel(writer, index=False, sheet_name='ASIN_Short_Names')
+
+        # Get the worksheet to add data validation
+        worksheet = writer.sheets['ASIN_Short_Names']
+        from openpyxl.worksheet.datavalidation import DataValidation
+
+        # Add data validation for Short_Name column (max 50 characters)
+        dv = DataValidation(type="textLength", operator="lessThanOrEqual", formula1="50",
+                           allow_blank=True, showErrorMessage=True,
+                           errorTitle="Invalid Short Name",
+                           error="Short name cannot exceed 50 characters")
+
+        # Apply validation to column B (Short_Name) for all rows
+        worksheet.add_data_validation(dv)
+        dv.add(f'B2:B{len(unique_asins) + 1}')
+
+    output.seek(0)
+    return output
+
+def validate_asin_shortname_file(uploaded_df, expected_asins):
+    """Validate the uploaded ASIN short names file"""
+    errors = []
+
+    # Check headers
+    if list(uploaded_df.columns) != ['ASINs', 'Short_Name']:
+        errors.append("Invalid headers. Expected: 'ASINs' and 'Short_Name'")
+        return False, errors, {}
+
+    # Check for missing ASINs column data
+    if uploaded_df['ASINs'].isnull().any():
+        errors.append("ASINs column contains empty values")
+
+    # Check for duplicate ASINs
+    if uploaded_df['ASINs'].duplicated().any():
+        errors.append("ASINs column contains duplicate values")
+
+    # Check if all ASINs match expected ASINs (irrespective of sorting)
+    uploaded_asins = set(uploaded_df['ASINs'].dropna().astype(str).tolist())
+    expected_asins_set = set(expected_asins)
+
+    if uploaded_asins != expected_asins_set:
+        missing_in_upload = expected_asins_set - uploaded_asins
+        extra_in_upload = uploaded_asins - expected_asins_set
+
+        if missing_in_upload:
+            errors.append(f"Missing ASINs in uploaded file: {', '.join(list(missing_in_upload)[:5])}{'...' if len(missing_in_upload) > 5 else ''}")
+        if extra_in_upload:
+            errors.append(f"Unexpected ASINs in uploaded file: {', '.join(list(extra_in_upload)[:5])}{'...' if len(extra_in_upload) > 5 else ''}")
+
+    # Check Short_Name length (max 50 characters)
+    short_names = uploaded_df['Short_Name'].dropna().astype(str)
+    invalid_lengths = short_names[short_names.str.len() > 50]
+
+    if not invalid_lengths.empty:
+        errors.append(f"Found {len(invalid_lengths)} short name(s) exceeding 50 characters")
+
+    # If there are errors, return early
+    if errors:
+        return False, errors, {}
+
+    # Create mapping dictionary
+    asin_shortname_map = {}
+    for _, row in uploaded_df.iterrows():
+        asin = str(row['ASINs'])
+        short_name = str(row['Short_Name']).strip() if pd.notna(row['Short_Name']) else ''
+        if short_name:  # Only add if short name is not empty
+            asin_shortname_map[asin] = short_name
+
+    return True, [], asin_shortname_map
+
 def find_sp_sheet(uploaded_file):
     """Find the Sponsored Products sheet in the Excel file and clean it"""
     # Read the Excel file into a pandas ExcelFile object
@@ -420,7 +513,49 @@ def generate_preview_name(naming_scheme, separators, custom_prefix, preview_opti
 
     return ''.join(name_parts)
 
-def generate_campaign_name(campaign, naming_scheme, separators, custom_prefix):
+def apply_asin_shortname(asin, asin_shortname_map):
+    """Apply short name mapping to ASIN"""
+    if asin in asin_shortname_map:
+        short_name = asin_shortname_map[asin]
+        return f"{asin}-{short_name}"
+    return asin
+
+def deduplicate_names(names_list):
+    """
+    Deduplicate names by adding sequential numbers (1, 2, 3, etc.) to duplicates.
+    Returns a list of deduplicated names in the same order.
+
+    Args:
+        names_list: List of (identifier, name) tuples
+
+    Returns:
+        Dictionary mapping identifier to deduplicated name
+    """
+    name_counts = {}
+    name_usage = {}
+    deduplicated = {}
+
+    # First pass: count occurrences of each name
+    for identifier, name in names_list:
+        name_counts[name] = name_counts.get(name, 0) + 1
+
+    # Second pass: assign deduplicated names
+    for identifier, name in names_list:
+        if name_counts[name] > 1:
+            # This name appears multiple times, add a number
+            if name not in name_usage:
+                name_usage[name] = 1
+            else:
+                name_usage[name] += 1
+
+            deduplicated[identifier] = f"{name}-{name_usage[name]}"
+        else:
+            # Unique name, no numbering needed
+            deduplicated[identifier] = name
+
+    return deduplicated
+
+def generate_campaign_name(campaign, naming_scheme, separators, custom_prefix, asin_shortname_map=None, use_short_names=False):
     """Generate campaign name based on naming scheme"""
     name_parts = []
 
@@ -446,23 +581,31 @@ def generate_campaign_name(campaign, naming_scheme, separators, custom_prefix):
         elif element == 'adGroupCount':
             part = f"{len(campaign['ad_groups'])}AdG"
         elif element == 'bestAsin':
-            part = campaign['best_asin'] or 'N/A'
+            asin = campaign['best_asin'] or 'N/A'
+            if use_short_names and asin_shortname_map:
+                part = apply_asin_shortname(asin, asin_shortname_map)
+            else:
+                part = asin
         elif element == 'biddingStrategy':
             part = campaign['bidding_strategy']
         elif element == 'bestPlacement':
             part = campaign['best_placement']
-        
+
         name_parts.append(part)
-        
+
         if idx < len(naming_scheme) - 1:
             name_parts.append(separators.get(idx, '-'))
-    
+
     return ''.join(name_parts)
 
-def generate_adgroup_name(ad_group):
+def generate_adgroup_name(ad_group, asin_shortname_map=None, use_short_names=False):
     """Generate ad group name"""
     best_asin = ad_group.get('best_asin') or 'N/A'
     best_match = ad_group.get('best_match_type') or 'N/A'
+
+    if use_short_names and asin_shortname_map:
+        best_asin = apply_asin_shortname(best_asin, asin_shortname_map)
+
     return f"{best_asin}-{best_match}"
 
 def generate_nomenclature_document(naming_scheme, separators, custom_prefix, campaigns):
@@ -528,7 +671,7 @@ NAMING ELEMENTS EXPLANATION
 
         if element == 'prefix':
             doc += f"PREFIX: '{custom_prefix}'\n"
-            doc += f"   - A fixed identifier for all Sponsored Product Campaigns\n"
+            doc += f"   - A fixed identifier for all campaigns\n"
             doc += f"   - Helps you quickly identify campaigns in Amazon Ads console\n"
 
         elif element == 'targetingType':
@@ -544,7 +687,7 @@ NAMING ELEMENTS EXPLANATION
             doc += "     • Ex = Exact Match\n"
             doc += "     • Ph = Phrase Match\n"
             doc += "     • Br = Broad Match\n"
-            doc += "     • PAT = Product ASIN Targeting\n"
+            doc += "     • PAT = Product Attribute Targeting\n"
             doc += "     • CAT = Category Targeting\n"
             doc += "   - Best performing match type is marked with asterisks (*)\n"
             doc += "   - Example: [Ex,*Br*,Ph] means Broad is performing best\n"
@@ -564,7 +707,7 @@ NAMING ELEMENTS EXPLANATION
 
         elif element == 'biddingStrategy':
             doc += "BIDDING STRATEGY\n"
-            doc += "   - Fix = Fixed Bids\n"
+            doc += "   - Fix = Fixed Bids (legacy)\n"
             doc += "   - DwnO = Dynamic Bids - Down Only\n"
             doc += "   - UnD = Dynamic Bids - Up and Down\n"
 
@@ -677,32 +820,56 @@ https://github.com/anthropics/claude-code
 
     return doc
 
-def create_bulk_file(campaigns, naming_scheme, separators, custom_prefix):
-    """Create bulk update file"""
+def create_bulk_file(campaigns, naming_scheme, separators, custom_prefix, asin_shortname_map=None, use_short_names=False):
+    """Create bulk update file with deduplication"""
     output_data = []
-    
+
     # Header row
     output_data.append([
         'Product', 'Entity', 'Operation', 'Campaign ID', 'Ad Group ID',
         '', '', '', '', 'Campaign Name', 'Ad Group Name'
     ])
-    
+
+    # Step 1: Generate all campaign names
+    campaign_names_list = []
     for campaign in campaigns.values():
-        # Campaign row
-        new_campaign_name = generate_campaign_name(campaign, naming_scheme, separators, custom_prefix)
+        new_campaign_name = generate_campaign_name(
+            campaign, naming_scheme, separators, custom_prefix,
+            asin_shortname_map, use_short_names
+        )
+        campaign_names_list.append((campaign['id'], new_campaign_name))
+
+    # Step 2: Deduplicate campaign names
+    deduplicated_campaign_names = deduplicate_names(campaign_names_list)
+
+    # Step 3: Process each campaign
+    for campaign in campaigns.values():
+        campaign_id = campaign['id']
+        final_campaign_name = deduplicated_campaign_names[campaign_id]
+
+        # Add campaign row
         output_data.append([
-            'Sponsored Products', 'Campaign', 'update', campaign['id'], '',
-            '', '', '', '', new_campaign_name, ''
+            'Sponsored Products', 'Campaign', 'update', campaign_id, '',
+            '', '', '', '', final_campaign_name, ''
         ])
-        
-        # Ad group rows
+
+        # Step 3a: Generate all ad group names for this campaign
+        adgroup_names_list = []
         for ad_group in campaign['ad_groups'].values():
-            new_adgroup_name = generate_adgroup_name(ad_group)
+            new_adgroup_name = generate_adgroup_name(ad_group, asin_shortname_map, use_short_names)
+            adgroup_names_list.append((ad_group['id'], new_adgroup_name))
+
+        # Step 3b: Deduplicate ad group names within this campaign
+        deduplicated_adgroup_names = deduplicate_names(adgroup_names_list)
+
+        # Step 3c: Add ad group rows
+        for ad_group in campaign['ad_groups'].values():
+            final_adgroup_name = deduplicated_adgroup_names[ad_group['id']]
             output_data.append([
-                'Sponsored Products', 'Ad Group', 'update', campaign['id'], ad_group['id'],
-                '', '', '', '', '', new_adgroup_name
+                'Sponsored Products', 'Ad Group', 'update', campaign_id, ad_group['id'],
+                '', '', '', '', '', final_adgroup_name
             ])
-    
+
     return pd.DataFrame(output_data)
 
 # Main App
@@ -737,11 +904,14 @@ if st.session_state.step == 1:
                     st.success(f"✓ Found Sponsored Products sheet: {sheet_name}")
                     
                     campaigns, global_asin_perf, errors = process_sponsored_products_sheet(df)
-                    
+
                     st.session_state.processed_data = campaigns
                     st.session_state.global_asin_performance = global_asin_perf
                     st.session_state.errors = errors
                     st.session_state.sp_sheet_data = df
+
+                    # Extract unique ASINs for template
+                    st.session_state.unique_asins = extract_unique_asins(campaigns)
                     
                     st.info(f"Processed {len(campaigns)} campaigns")
                     
@@ -913,7 +1083,68 @@ elif st.session_state.step == 2:
             preview_divider_placeholder.divider()
 
     st.divider()
-    
+
+    # ASIN Short Names Section
+    st.header("ASIN Short Names (Optional)")
+    st.write("Download a template file with all unique ASINs from your bulk file, add short names, and upload it back to replace ASINs in campaign/ad group names.")
+
+    asin_col1, asin_col2 = st.columns(2)
+
+    with asin_col1:
+        st.subheader("Step 1: Download Template")
+        if st.session_state.unique_asins:
+            template_file = create_asin_template(st.session_state.unique_asins)
+
+            st.download_button(
+                label=f"📥 Download ASIN Template ({len(st.session_state.unique_asins)} ASINs)",
+                data=template_file,
+                file_name="ASIN_Short_Names_Template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            st.caption("⚠️ Fill in the 'Short_Name' column (max 50 characters) and upload below")
+        else:
+            st.warning("No ASINs found in the processed data")
+
+    with asin_col2:
+        st.subheader("Step 2: Upload Completed Template")
+        uploaded_shortname_file = st.file_uploader("Upload ASIN Short Names File", type=['xlsx'], key="asin_shortname_upload")
+
+        if uploaded_shortname_file:
+            try:
+                uploaded_df = pd.read_excel(uploaded_shortname_file, sheet_name='ASIN_Short_Names')
+
+                # Validate the file
+                is_valid, validation_errors, asin_map = validate_asin_shortname_file(
+                    uploaded_df,
+                    st.session_state.unique_asins
+                )
+
+                if is_valid:
+                    st.success(f"✓ Valid! Found {len(asin_map)} ASIN short names")
+                    st.session_state.asin_short_names = asin_map
+
+                    # Checkbox to enable mapping
+                    st.session_state.use_short_names = st.checkbox(
+                        "✅ Map Short Names to ASINs",
+                        value=st.session_state.use_short_names,
+                        help="Replace ASINs in campaign and ad group names with 'ASIN-ShortName'"
+                    )
+
+                    if st.session_state.use_short_names:
+                        st.info("🔄 ASINs will be replaced with 'ASIN-ShortName' format")
+                else:
+                    st.error("❌ Validation Failed:")
+                    for error in validation_errors:
+                        st.error(f"• {error}")
+                    st.session_state.use_short_names = False
+
+            except Exception as e:
+                st.error(f"Error reading file: {str(e)}")
+                st.session_state.use_short_names = False
+
+    st.divider()
+
     col_back, col_next = st.columns(2)
     with col_back:
         if st.button("← Back to Upload"):
@@ -943,34 +1174,56 @@ elif st.session_state.step == 3:
                     st.session_state.current_page = (idx // 10) + 1
                     st.rerun()
     
+    # Generate deduplicated campaign names for all campaigns
+    campaign_names_list = []
+    for campaign in campaign_list:
+        new_campaign_name = generate_campaign_name(
+            campaign,
+            st.session_state.naming_scheme,
+            st.session_state.separators,
+            st.session_state.custom_prefix,
+            st.session_state.asin_short_names,
+            st.session_state.use_short_names
+        )
+        campaign_names_list.append((campaign['id'], new_campaign_name))
+
+    deduplicated_campaign_names = deduplicate_names(campaign_names_list)
+
     # Pagination
     items_per_page = 10
     total_pages = (len(campaign_list) + items_per_page - 1) // items_per_page
     start_idx = (st.session_state.current_page - 1) * items_per_page
     end_idx = min(start_idx + items_per_page, len(campaign_list))
     current_campaigns = campaign_list[start_idx:end_idx]
-    
+
     # Display campaigns
     for campaign in current_campaigns:
-        new_name = generate_campaign_name(
-            campaign,
-            st.session_state.naming_scheme,
-            st.session_state.separators,
-            st.session_state.custom_prefix
-        )
-        
+        final_campaign_name = deduplicated_campaign_names[campaign['id']]
+
         with st.expander(f"Campaign {campaign['id']} ({len(campaign['ad_groups'])} ad groups)"):
             st.write("**Old Name:**")
             st.code(campaign['name'], language=None)
             st.write("**New Name:**")
-            st.code(new_name, language=None)
-            
+            st.code(final_campaign_name, language=None)
+
             if st.checkbox("View Ad Groups", key=f"view_ag_{campaign['id']}"):
+                # Generate deduplicated ad group names for this campaign
+                adgroup_names_list = []
                 for ad_group in campaign['ad_groups'].values():
-                    new_ag_name = generate_adgroup_name(ad_group)
+                    new_adgroup_name = generate_adgroup_name(
+                        ad_group,
+                        st.session_state.asin_short_names,
+                        st.session_state.use_short_names
+                    )
+                    adgroup_names_list.append((ad_group['id'], new_adgroup_name))
+
+                deduplicated_adgroup_names = deduplicate_names(adgroup_names_list)
+
+                for ad_group in campaign['ad_groups'].values():
+                    final_adgroup_name = deduplicated_adgroup_names[ad_group['id']]
                     st.write(f"**Ad Group:** {ad_group['id']}")
                     st.write(f"Old: `{ad_group['name']}`")
-                    st.write(f"New: `{new_ag_name}`")
+                    st.write(f"New: `{final_adgroup_name}`")
                     st.divider()
     
     # Pagination controls
@@ -1032,7 +1285,9 @@ elif st.session_state.step == 4:
         campaigns,
         st.session_state.naming_scheme,
         st.session_state.separators,
-        st.session_state.custom_prefix
+        st.session_state.custom_prefix,
+        st.session_state.asin_short_names,
+        st.session_state.use_short_names
     )
     
     # Convert to Excel
@@ -1100,6 +1355,9 @@ elif st.session_state.step == 4:
             st.session_state.current_page = 1
             st.session_state.sp_sheet_data = None
             st.session_state.global_asin_performance = {}
+            st.session_state.unique_asins = []
+            st.session_state.asin_short_names = {}
+            st.session_state.use_short_names = False
             st.session_state.preview_options = {
                 'targetingType': 'M',
                 'matchTypes': ['Ex', 'Br'],
